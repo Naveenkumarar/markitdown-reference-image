@@ -20,83 +20,114 @@ pip install markitdown-reference-image
 
 ### Basic Usage
 
+Extract and highlight text from a markdown file:
+
 ```python
 from markitdown_reference_image import MarkitdownImageExtractor
 
 # Initialize the extractor
 extractor = MarkitdownImageExtractor()
 
-# Path to your markdown file
-markdown_file = "document.md"
-
-# Text chunk to find and highlight
-chunk_text = "target text that we want to find"
-
 # Extract image with highlighted text
 image_path = extractor.extract_with_highlight(
-    markdown_file=markdown_file,
-    chunk_text=chunk_text,
-    output_path="highlighted_image.png"
+    markdown_file="test_document.md",
+    chunk_text="important information that we want to highlight",
+    output_path="assets/example_basic.png",
+    score=0.95
 )
 
 print(f"Image saved to: {image_path}")
 ```
 
-### With Score
+**Result:**
+
+![Basic Example](assets/example_basic.png)
+
+---
+
+### With Score Display
+
+Add a similarity score to show retrieval confidence (great for RAG systems):
 
 ```python
-# Extract image with highlighted text and score
 image_path = extractor.extract_with_highlight(
-    markdown_file="document.md",
-    chunk_text=chunk_text,
-    output_path="highlighted_image_with_score.png",
-    score=0.85  # Score to display in the bounding box
+    markdown_file="test_document.md",
+    chunk_text="Text Finding: Find specific text chunks in markdown content",
+    output_path="assets/example_with_score.png",
+    score=0.88  # RAG similarity score
 )
 ```
 
-### Using Temporary Output
+**Result:**
 
-```python
-# If no output_path is provided, a temporary file will be created
-image_path = extractor.extract_with_highlight(
-    markdown_file="document.md",
-    chunk_text=chunk_text
-    # No output_path specified - will use temporary file
-)
-```
+![With Score](assets/example_with_score.png)
+
+---
 
 ### Custom Styling
 
+Customize colors and appearance to match your brand:
+
 ```python
-# Customize the bounding box appearance
 image_path = extractor.extract_with_highlight(
-    markdown_file="document.md",
-    chunk_text=chunk_text,
-    output_path="custom_highlighted_image.png",
+    markdown_file="test_document.md",
+    chunk_text="Image Extraction",
+    output_path="assets/example_custom_styling.png",
     score=0.92,
-    box_color=(0, 255, 0),  # Green box
-    box_width=5,            # Thicker box
-    score_color=(255, 255, 0),  # Yellow text
-    score_bg_color=(0, 0, 255)  # Blue background
+    box_color=(0, 255, 0),        # Green box
+    box_width=5,                   # Thicker border
+    score_color=(255, 255, 0),     # Yellow text
+    score_bg_color=(0, 128, 0)     # Dark green background
 )
 ```
 
-### Improved Positioning
+**Result:**
+
+![Custom Styling](assets/example_custom_styling.png)
+
+---
+
+### Using Temporary Output
+
+No output path? No problem - a temporary file is created:
 
 ```python
-# Use custom font metrics for better positioning
-extractor = MarkitdownImageExtractor(
-    font_size=18,    # Larger font size
-    line_height=28,  # More line spacing
-    char_width=10    # Wider character width
+# Temporary file will be created automatically
+image_path = extractor.extract_with_highlight(
+    markdown_file="test_document.md",
+    chunk_text="visual references from markdown"
+    # No output_path specified - uses temporary file
 )
 
-image_path = extractor.extract_with_highlight(
-    markdown_file="document.md",
-    chunk_text=chunk_text,
-    output_path="improved_positioning.png",
-    score=0.95
-)
+print(f"Temporary image: {image_path}")
+# Example: /tmp/tmp8x3k9m2p.png
+```
+
+**Result:**
+
+![Temporary Output](assets/example_temporary.png)
+
+---
+
+### Command Line Interface
+
+Quick testing and automation via CLI:
+
+```bash
+# Basic usage
+markitdown-extract test_document.md "important information" -o output.png
+
+# With score
+markitdown-extract test_document.md "Text Finding" -o output.png -s 0.88
+
+# Custom styling
+markitdown-extract test_document.md "Image Extraction" \
+  -o output.png \
+  -s 0.92 \
+  --box-color 0 255 0 \
+  --box-width 5 \
+  --score-color 255 255 0 \
+  --score-bg-color 0 128 0
 ```
 
 ## Examples
