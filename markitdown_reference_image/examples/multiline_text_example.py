@@ -38,9 +38,24 @@ The package uses JavaScript-based text finding with window.find() which can loca
 - Another list item
 - Final list item
 
+## Scenario 5: Text With Unusual Spacing
+
+This     text     has     multiple     spaces     and
+
+
+line
+breaks
+that
+should
+still
+be
+found
+correctly
+thanks to automatic normalization.
+
 ## Conclusion
 
-The DOM-based positioning ensures accurate bounding boxes even for complex text selections.
+The DOM-based positioning ensures accurate bounding boxes even for complex text selections. The package automatically handles various whitespace patterns!
 """
     
     doc_path = "multiline_demo.md"
@@ -110,6 +125,28 @@ def test_multiline_highlighting():
         )
         print(f"✅ Result: {result5}")
         
+        # Test 6: Text with excessive whitespace (like copy-pasted from PDF)
+        print("\n📝 Test 6: Text with unusual spacing (automatic normalization)")
+        # This text has excessive line breaks and spaces, simulating copy-paste from PDF
+        messy_text = """This     text     has     multiple     spaces     and
+
+
+line
+breaks
+that
+should
+still
+be
+found"""
+        result6 = extractor.extract_with_highlight(
+            markdown_file=doc_path,
+            chunk_text=messy_text,
+            output_path="test_messy_spacing.png",
+            score=0.88
+        )
+        print(f"✅ Result: {result6}")
+        print("   💡 The package automatically normalized the whitespace!")
+        
         print("\n🎉 All multi-line tests completed successfully!")
         print("\n📁 Generated files:")
         print("  - test_simple_multiline.png")
@@ -117,12 +154,14 @@ def test_multiline_highlighting():
         print("  - test_long_span.png")
         print("  - test_list_item.png")
         print("  - test_multiple_words.png")
+        print("  - test_messy_spacing.png")
         
         print("\n💡 Key Features Demonstrated:")
         print("  ✅ Text spanning multiple lines in source")
         print("  ✅ Text with formatting (bold, italic, etc.)")
         print("  ✅ Very long text selections")
         print("  ✅ Text in various HTML elements (lists, paragraphs)")
+        print("  ✅ Automatic whitespace normalization")
         print("  ✅ Accurate bounding boxes for all cases")
         
     except Exception as e:
@@ -145,13 +184,20 @@ def main():
     print("This example demonstrates the package's ability to accurately")
     print("highlight text that spans multiple lines or crosses element boundaries.")
     print()
+    print("✨ The package automatically handles:")
+    print("   • Text with excessive line breaks")
+    print("   • Text with multiple spaces")
+    print("   • Text copied from PDFs")
+    print("   • Text across DOM element boundaries")
+    print()
     
     success = test_multiline_highlighting()
     
     if success:
         print("\n✨ Example completed successfully!")
         print("The bounding boxes should be accurately positioned around all text,")
-        print("regardless of line breaks or HTML structure.")
+        print("regardless of line breaks, whitespace, or HTML structure.")
+        print("\n💡 No preprocessing needed - just pass your text as-is!")
     else:
         print("\n❌ Example failed. Check the error messages above.")
 

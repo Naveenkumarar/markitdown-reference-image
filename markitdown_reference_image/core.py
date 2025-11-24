@@ -34,6 +34,407 @@ class MarkitdownImageExtractor:
         self.text_finder = TextFinder()
         self.image_processor = ImageProcessor(font_size, line_height, char_width)
     
+    def _normalize_for_search(self, text: str) -> str:
+        """
+        Normalize text for searching by collapsing whitespace.
+        
+        This handles text that may have been copied from PDFs or markdown files
+        with excessive line breaks and spacing.
+        
+        Args:
+            text: Text to normalize
+            
+        Returns:
+            Normalized text with collapsed whitespace
+        """
+        import re
+        # Collapse all whitespace (spaces, tabs, newlines) into single spaces
+        normalized = re.sub(r'\s+', ' ', text)
+        # Strip leading/trailing whitespace
+        normalized = normalized.strip()
+        # Lowercase for case-insensitive comparison
+        normalized = normalized.lower()
+        return normalized
+    
+    def _map_normalized_to_actual_positions(self, markdown_content: str, norm_start: int, norm_end: int) -> tuple:
+        """
+        Map positions from normalized content back to actual markdown content.
+        
+        Args:
+            markdown_content: Original markdown
+            norm_start: Start position in normalized content
+            norm_end: End position in normalized content
+            
+        Returns:
+            Tuple of (actual_start, actual_end)
+        """
+        # Build mapping from normalized to actual positions
+        normalized = self._normalize_for_search(markdown_content)
+        
+        actual_pos = 0
+        norm_pos = 0
+        actual_start = None
+        actual_end = None
+        
+        # Walk through original content character by character
+        for actual_pos in range(len(markdown_content)):
+            char = markdown_content[actual_pos]
+            
+            # Check if we've reached the start position
+            if norm_pos == norm_start and actual_start is None:
+                actual_start = actual_pos
+            
+            # Check if we've reached the end position
+            if norm_pos == norm_end and actual_end is None:
+                actual_end = actual_pos
+                break
+            
+            # Advance normalized position based on the character
+            if char.isspace():
+                # Only count if previous wasn't also space (collapses whitespace)
+                if norm_pos == 0 or normalized[norm_pos-1:norm_pos] != ' ':
+                    if norm_pos < len(normalized):
+                        norm_pos += 1
+            else:
+                if norm_pos < len(normalized) and normalized[norm_pos] == char.lower():
+                    norm_pos += 1
+        
+        # Handle edge cases
+        if actual_start is None:
+            actual_start = 0
+        if actual_end is None:
+            actual_end = len(markdown_content)
+        
+        return (actual_start, actual_end)
+    
+    def _extract_chunk_by_first_last_words(self, markdown_content: str, chunk_text: str) -> tuple:
+        """
+        Extract chunk using first 10 and last 10 words approach.
+        
+        Args:
+            markdown_content: Full markdown content
+            chunk_text: Text chunk to find
+            
+        Returns:
+            Tuple of (page_content, chunk_start_in_page, chunk_end_in_page)
+        """
+        # Get first 10 words
+        chunk_words = chunk_text.split()
+        first_10_words = ' '.join(chunk_words[:10])
+        last_10_words = ' '.join(chunk_words[-10:])
+        
+        # Normalize both content and search phrases (collapse whitespace)
+        normalized_content = self._normalize_for_search(markdown_content)
+        normalized_first = self._normalize_for_search(first_10_words)
+        normalized_last = self._normalize_for_search(last_10_words)
+        
+        # Find in normalized content
+        start_pos = normalized_content.find(normalized_first)
+        
+        if start_pos == -1:
+            # Try with fewer words
+            for i in range(9, 3, -1):
+                test_phrase = self._normalize_for_search(' '.join(chunk_words[:i]))
+                start_pos = normalized_content.find(test_phrase)
+                if start_pos != -1:
+                    break
+        
+        if start_pos == -1:
+            raise ValueError("Could not find start of chunk in markdown")
+        
+        # Find last 10 words in markdown (search from start_pos onwards)
+        end_search_start = start_pos + len(normalized_first)
+        end_pos = normalized_content.find(normalized_last, end_search_start)
+        
+        if end_pos == -1:
+            # Try with fewer words
+            for i in range(9, 3, -1):
+                test_phrase = self._normalize_for_search(' '.join(chunk_words[-i:]))
+                end_pos = normalized_content.find(test_phrase, end_search_start)
+                if end_pos != -1:
+                    end_pos += len(test_phrase)
+                    break
+        else:
+            end_pos += len(normalized_last)
+        
+        if end_pos == -1:
+            raise ValueError("Could not find end of chunk in markdown")
+        
+        # Now map normalized positions back to actual markdown positions
+        actual_start, actual_end = self._map_normalized_to_actual_positions(
+            markdown_content, 
+            start_pos, 
+            end_pos
+        )
+        
+        # Extract the chunk from actual markdown
+        chunk_in_md = markdown_content[actual_start:actual_end]
+        
+        # Add context before and after to center it on the page
+        # Add ~300 chars before and after
+        context_before_start = max(0, actual_start - 300)
+        context_after_end = min(len(markdown_content), actual_end + 300)
+        
+        page_content = markdown_content[context_before_start:context_after_end]
+        
+        # Calculate where the chunk is within this page content
+        chunk_start_in_page = actual_start - context_before_start
+        chunk_end_in_page = actual_end - context_before_start
+        
+        return (page_content, chunk_start_in_page, chunk_end_in_page)
+    
+    def _extract_context_around_chunk_with_markers(self, markdown_content: str, chunk_text: str, context_lines: int = 5) -> tuple:
+        """
+        Extract markdown content with context and return chunk position markers.
+        
+        Returns:
+            Tuple of (context_markdown, chunk_start_pos, chunk_end_pos)
+        """
+        context = self._extract_context_around_chunk(markdown_content, chunk_text, context_lines)
+        
+        # Now find where the chunk is within this context
+        # Normalize both to find position
+        normalized_context = self._normalize_for_search(context)
+        normalized_chunk = self._normalize_for_search(chunk_text)
+        
+        chunk_pos = normalized_context.find(normalized_chunk)
+        
+        if chunk_pos == -1:
+            
+            # Try to find start and end separately
+            chunk_words = normalized_chunk.split()
+            
+            # Find first few words
+            start_phrase = ' '.join(chunk_words[:5])
+            start_pos = normalized_context.find(start_phrase)
+            
+            # Find last few words  
+            end_phrase = ' '.join(chunk_words[-5:])
+            end_pos = normalized_context.find(end_phrase)
+            
+            if start_pos != -1 and end_pos != -1:
+                chunk_pos = start_pos
+                chunk_len = end_pos - start_pos + len(end_phrase)
+            else:
+                return (context, 0, len(context))
+        else:
+            chunk_len = len(normalized_chunk)
+        
+        # Map normalized positions back to actual positions in context
+        # Build a mapping by processing character by character
+        norm_to_actual = []
+        actual_pos = 0
+        
+        for char in context:
+            if not char.isspace() or (norm_to_actual and norm_to_actual[-1] != actual_pos):
+                norm_to_actual.append(actual_pos)
+            actual_pos += 1
+        
+        # Ensure we have enough mappings
+        while len(norm_to_actual) < len(normalized_context):
+            norm_to_actual.append(len(context))
+        
+        # Get actual start and end positions
+        actual_start = norm_to_actual[min(chunk_pos, len(norm_to_actual)-1)]
+        actual_end = norm_to_actual[min(chunk_pos + chunk_len - 1, len(norm_to_actual)-1)] + 1
+        
+        return (context, actual_start, actual_end)
+    
+    def _extract_context_around_chunk(self, markdown_content: str, chunk_text: str, context_lines: int = 5) -> str:
+        """
+        Extract markdown content with context around the chunk.
+        Find the exact text in markdown and extract surrounding lines.
+        
+        Args:
+            markdown_content: Full markdown content
+            chunk_text: Text chunk to find (exact or normalized)
+            context_lines: Number of lines before/after to include
+            
+        Returns:
+            Markdown content with context around chunk
+        """
+        lines = markdown_content.split('\n')
+        
+        # Try to find the chunk text in the content
+        # First normalize both for searching
+        normalized_content = self._normalize_for_search(markdown_content)
+        normalized_chunk = self._normalize_for_search(chunk_text)
+        
+        # Find position in normalized content
+        pos = normalized_content.find(normalized_chunk)
+        
+        if pos == -1:
+            # Try finding start and end by matching words
+            chunk_words = chunk_text.split()
+            
+            # Find start: look for first 5 words
+            start_words = [w.lower() for w in chunk_words[:5] if len(w) > 2]
+            start_line = None
+            
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                matches = sum(1 for w in start_words if w in line_lower)
+                if matches >= min(3, len(start_words)):
+                    start_line = i
+                    break
+            
+            # Find end: look for last 5 words
+            end_words = [w.lower() for w in chunk_words[-5:] if len(w) > 2]
+            end_line = None
+            
+            if start_line is not None:
+                # Search from start_line onwards
+                for i in range(start_line, len(lines)):
+                    line_lower = lines[i].lower()
+                    matches = sum(1 for w in end_words if w in line_lower)
+                    if matches >= min(3, len(end_words)):
+                        end_line = i
+                        break
+            
+            if start_line is not None:
+                if end_line is None:
+                    end_line = start_line + len(chunk_words) // 5  # Estimate
+                
+                context_start = max(0, start_line - context_lines)
+                context_end = min(len(lines), end_line + context_lines + 1)
+                return '\n'.join(lines[context_start:context_end])
+            
+            return markdown_content
+        
+        # Map position back to original lines by building normalized content line by line
+        current_pos = 0
+        start_line = None
+        end_line = None
+        
+        for i, line in enumerate(lines):
+            line_normalized = self._normalize_for_search(line)
+            line_len = len(line_normalized)
+            
+            # Check if chunk starts in or before this line
+            if start_line is None and current_pos <= pos < current_pos + line_len + 1:
+                start_line = i
+            
+            # Check if chunk ends in or after this line
+            if start_line is not None and current_pos + line_len >= pos + len(normalized_chunk):
+                end_line = i
+                break
+            
+            current_pos += line_len + 1  # +1 for space between lines
+        
+        if start_line is None:
+            start_line = 0
+        if end_line is None:
+            end_line = len(lines) - 1
+        
+        # Extract with context
+        # Make sure we include enough lines to cover the entire chunk
+        lines_in_chunk = end_line - start_line + 1
+        context_start = max(0, start_line - context_lines)
+        context_end = min(len(lines), end_line + context_lines + 1)
+        
+        # Return the EXACT lines from markdown (no normalization)
+        extracted = '\n'.join(lines[context_start:context_end])
+        
+        return extracted
+    
+    def find_text_in_markdown(
+        self,
+        markdown_file: Union[str, Path],
+        search_query: str,
+        context_lines: int = 5
+    ) -> Optional[str]:
+        """
+        Find text in markdown file and return it with context.
+        
+        Args:
+            markdown_file: Path to the markdown file
+            search_query: Short text to search for
+            context_lines: Number of lines before/after to include
+            
+        Returns:
+            Found text with context, or None if not found
+        """
+        markdown_path = Path(markdown_file)
+        if not markdown_path.exists():
+            return None
+            
+        with open(markdown_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Normalize for searching
+        normalized_content = self._normalize_for_search(content)
+        normalized_query = self._normalize_for_search(search_query)
+        
+        # Find position
+        pos = normalized_content.find(normalized_query)
+        if pos == -1:
+            return None
+        
+        # Map the position back to the original content
+        # Count characters while preserving line structure
+        lines = content.split('\n')
+        current_pos = 0
+        start_line = 0
+        
+        for i, line in enumerate(lines):
+            line_normalized = self._normalize_for_search(line)
+            line_len = len(line_normalized)
+            
+            if current_pos <= pos < current_pos + line_len + 1:
+                start_line = i
+                break
+            
+            current_pos += line_len + 1  # +1 for space/newline
+        
+        # Get context lines
+        start = max(0, start_line - context_lines)
+        end = min(len(lines), start_line + context_lines + 1)
+        
+        return '\n'.join(lines[start:end])
+    
+    def search_and_highlight(
+        self,
+        markdown_file: Union[str, Path],
+        search_query: str,
+        output_path: Optional[Union[str, Path]] = None,
+        score: Optional[float] = None,
+        context_lines: int = 10,
+        **kwargs
+    ) -> str:
+        """
+        Search for text in markdown and highlight it (convenience method).
+        
+        Args:
+            markdown_file: Path to the markdown file
+            search_query: Short text query to search for
+            output_path: Path to save the output image
+            score: Optional score to display
+            context_lines: Lines of context to include around match
+            **kwargs: Additional arguments
+            
+        Returns:
+            str: Path to the saved image file
+        """
+        # Find the text with context
+        found_text = self.find_text_in_markdown(
+            markdown_file=markdown_file,
+            search_query=search_query,
+            context_lines=context_lines
+        )
+        
+        if not found_text:
+            # If not found with context, try just the search query
+            found_text = search_query
+        
+        # Highlight it
+        return self.extract_with_highlight(
+            markdown_file=markdown_file,
+            chunk_text=found_text,
+            output_path=output_path,
+            score=score,
+            **kwargs
+        )
+    
     def extract_with_highlight(
         self,
         markdown_file: Union[str, Path],
@@ -67,16 +468,25 @@ class MarkitdownImageExtractor:
         with open(markdown_path, 'r', encoding='utf-8') as f:
             markdown_content = f.read()
         
-        # Normalize the chunk text for searching
-        normalized_chunk = self.text_finder._normalize_text(chunk_text)
+        # Basic validation - check if some key words exist
+        chunk_words = [w for w in chunk_text.split() if len(w) > 3]
+        if len(chunk_words) >= 3:
+            normalized_content = self._normalize_for_search(markdown_content)
+            found_words = sum(1 for word in chunk_words[:10] if word.lower() in normalized_content)
+            if found_words < 3:
+                raise ValueError(f"Text doesn't appear to exist in document. Found only {found_words} matching words.")
         
-        # Check if the text exists in the markdown
-        if normalized_chunk not in self.text_finder._normalize_text(markdown_content):
-            raise ValueError(f"Chunk text '{chunk_text}' not found in markdown file")
-        
-        # Convert markdown to HTML with text highlighting
+        # Extract context using first/last words method
         try:
-            html_content = self._markdown_to_html(markdown_content, chunk_text)
+            context_markdown, chunk_start, chunk_end = self._extract_chunk_by_first_last_words(
+                markdown_content, 
+                chunk_text
+            )
+            
+            # Convert markdown to HTML with text highlighting
+            # Now we know exactly where the chunk is in the context
+            html_content = self._markdown_to_html_with_marked_chunk(context_markdown, chunk_start, chunk_end)
+            
             # Capture image and get bounding box coordinates from the rendered page
             image_path, bbox_coords = self._html_to_image_with_bbox(html_content)
         except RuntimeError as e:
@@ -102,7 +512,90 @@ class MarkitdownImageExtractor:
         
         return result_path
     
-    def _markdown_to_html(self, markdown_content: str, target_text: str = None) -> str:
+    def _markdown_to_html_with_marked_chunk(self, markdown_content: str, chunk_start: int, chunk_end: int) -> str:
+        """
+        Convert markdown to HTML and mark the chunk position.
+        
+        Args:
+            markdown_content: Markdown content
+            chunk_start: Start position of chunk in markdown
+            chunk_end: End position of chunk in markdown
+            
+        Returns:
+            HTML with marked chunk
+        """
+        import markdown
+        
+        # Insert markers around the chunk in markdown
+        before = markdown_content[:chunk_start]
+        chunk = markdown_content[chunk_start:chunk_end]
+        after = markdown_content[chunk_end:]
+        
+        # Insert marker spans at start and end
+        # Keep them simple so they survive markdown conversion
+        start_marker = '<span id="chunk-start"></span>'
+        end_marker = '<span id="chunk-end"></span>'
+        
+        marked_markdown = before + start_marker + chunk + end_marker + after
+        
+        # Convert to HTML
+        html = markdown.markdown(marked_markdown, extensions=['extra'])
+        
+        # Wrap in HTML structure
+        full_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                @page {{
+                    size: A4;
+                    margin: 0;
+                }}
+                
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    width: 794px;
+                    min-height: 1123px;
+                    margin: 0;
+                    padding: 40px;
+                    box-sizing: border-box;
+                    background: white;
+                }}
+                
+                h1, h2, h3, h4, h5, h6 {{
+                    color: #333;
+                }}
+                
+                code {{
+                    background-color: #f4f4f4;
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                }}
+                
+                pre {{
+                    background-color: #f4f4f4;
+                    padding: 10px;
+                    border-radius: 5px;
+                    overflow-x: auto;
+                }}
+                
+                #highlight-target {{
+                    position: relative !important;
+                    display: inline !important;
+                }}
+            </style>
+        </head>
+        <body>
+            {html}
+        </body>
+        </html>
+        """
+        
+        return full_html
+    
+    def _markdown_to_html(self, markdown_content: str, target_text: str = None, highlight_full_chunk: bool = False) -> str:
         """
         Convert markdown content to HTML with optional text marking.
         Uses JavaScript to find and wrap text after page load for better multi-line support.
@@ -149,79 +642,491 @@ class MarkitdownImageExtractor:
                         .trim();
                 }}
                 
-                // Function to find and wrap text across nodes
-                function highlightText(searchText) {{
-                    // Strip markdown from search text
-                    let cleanSearchText = stripMarkdown(searchText);
+                // Function to generate all possible search variants
+                function generateSearchVariants(text) {{
+                    const variants = [];
                     
-                    // Replace newlines with spaces for searching
-                    cleanSearchText = cleanSearchText.replace(/\\n/g, ' ').replace(/\\r/g, '');
+                    // Strip markdown first
+                    const stripped = stripMarkdown(text);
                     
-                    const normalized = normalizeText(cleanSearchText);
+                    // Fully normalized (collapse all whitespace)
+                    const fullyNormalized = stripped.replace(/\\s+/g, ' ').trim();
+                    
+                    // For very long text, also create a unique signature (first + middle + last parts)
+                    if (fullyNormalized.length > 100) {{
+                        const words = fullyNormalized.split(' ');
+                        // Create a signature from start, middle, and end
+                        const signatureWords = [
+                            ...words.slice(0, 5),  // First 5 words
+                            ...words.slice(Math.floor(words.length / 2) - 2, Math.floor(words.length / 2) + 3),  // Middle 5 words
+                            ...words.slice(-5)  // Last 5 words
+                        ];
+                        const signature = signatureWords.join(' ');
+                        variants.push(signature);
+                        console.log('Added signature variant:', signature.substring(0, 80));
+                    }}
+                    
+                    // Add full normalized
+                    variants.push(fullyNormalized);
+                    
+                    // Replace newlines with spaces
+                    variants.push(text.replace(/[\\n\\r\\t]+/g, ' ').trim());
+                    variants.push(stripped.replace(/[\\n\\r\\t]+/g, ' ').trim());
+                    
+                    // Original fully normalized
+                    variants.push(text.replace(/\\s+/g, ' ').trim());
+                    
+                    // Original text
+                    variants.push(text);
+                    variants.push(stripped);
+                    
+                    // Remove duplicate variants and empty strings
+                    const unique = [...new Set(variants)].filter(v => v && v.trim().length > 0);
+                    
+                    // Sort by length (try longer matches first)
+                    unique.sort((a, b) => b.length - a.length);
+                    
+                    console.log('Generated ' + unique.length + ' variants, lengths:', unique.map(v => v.length));
+                    
+                    return unique;
+                }}
+                
+                // Function to find text using multiple strategies
+                function findTextInDocument(searchText) {{
                     const bodyElement = document.body;
-                    
-                    // Get all text content
                     const fullText = bodyElement.innerText || bodyElement.textContent;
                     const normalizedFull = normalizeText(fullText);
                     
-                    // Find position in normalized text
-                    const startPos = normalizedFull.indexOf(normalized);
-                    if (startPos === -1) {{
-                        console.warn('Text not found. Searched for:', normalized);
-                        console.warn('In text:', normalizedFull.substring(0, 500));
-                        return false;
+                    // Generate search variants
+                    const variants = generateSearchVariants(searchText);
+                    
+                    // Filter out variants that are too short (likely to match wrong text)
+                    const MIN_LENGTH = 20;  // Require at least 20 chars
+                    const longVariants = variants.filter(v => v.trim().length >= MIN_LENGTH);
+                    
+                    if (longVariants.length === 0) {{
+                        console.warn('All variants too short, using original variants');
+                        // Fall back to original variants if all are too short
+                        longVariants.push(...variants);
                     }}
                     
-                    // Use window.find() to search and select the text
-                    // This works across multiple DOM nodes
+                    // First check if any variant exists in the document (for debugging)
+                    let bestVariant = null;
+                    for (const variant of longVariants) {{
+                        const normalized = normalizeText(variant);
+                        if (normalized.length >= MIN_LENGTH && normalizedFull.indexOf(normalized) !== -1) {{
+                            bestVariant = variant;
+                            console.log('Found matching variant (length: ' + variant.length + '):', variant.substring(0, 100));
+                            break;
+                        }}
+                    }}
+                    
+                    if (!bestVariant) {{
+                        console.warn('No variant found in document');
+                        console.warn('Tried variants:', longVariants.map(v => v.substring(0, 50)));
+                        console.warn('Document text (first 500 chars):', normalizedFull.substring(0, 500));
+                        return null;
+                    }}
+                    
+                    // Try to find using window.find() with each variant
+                    // Start with longer variants first (more specific)
                     if (window.find) {{
-                        // Clear any existing selection
+                        for (const variant of longVariants) {{
+                            if (!variant || !variant.trim() || variant.trim().length < 10) continue;
+                            
+                            // Clear previous selection
                         if (window.getSelection) {{
                             window.getSelection().removeAllRanges();
-                        }}
-                        
-                        // Split search text into smaller chunks if it contains line breaks
-                        const searchVariants = [
-                            cleanSearchText,
-                            cleanSearchText.replace(/\\s+/g, ' '),  // Normalize whitespace
-                            searchText.replace(/\\n/g, ' ')  // Original with newlines replaced
-                        ];
-                        
-                        let found = false;
-                        for (const variant of searchVariants) {{
-                            if (variant && variant.trim()) {{
-                                window.getSelection().removeAllRanges();
-                                found = window.find(variant.trim(), false, false, false, false, false, false);
-                                if (found) break;
                             }}
-                        }}
-                        
-                        if (found && window.getSelection) {{
-                            const selection = window.getSelection();
-                            if (selection.rangeCount > 0) {{
-                                const range = selection.getRangeAt(0);
+                            
+                            const trimmed = variant.trim();
+                            console.log('Trying to find (length: ' + trimmed.length + '):', trimmed.substring(0, 80));
+                            
+                            // Try to find this variant
+                            const found = window.find(trimmed, false, false, false, false, false, false);
+                            
+                            if (found) {{
+                                const selection = window.getSelection();
+                                const selectedText = selection.toString();
+                                console.log('Found match (length: ' + selectedText.length + '):', selectedText.substring(0, 80));
                                 
-                                // Create a span to wrap the selection
-                                const span = document.createElement('span');
-                                span.id = 'highlight-target';
-                                span.style.position = 'relative';
-                                
-                                try {{
-                                    // Wrap the selected text
-                                    range.surroundContents(span);
-                                    return true;
-                                }} catch (e) {{
-                                    // If surroundContents fails (crosses element boundaries),
-                                    // use a different approach
-                                    const contents = range.extractContents();
-                                    span.appendChild(contents);
-                                    range.insertNode(span);
-                                    return true;
+                                // Verify it's a substantial match (at least 10 chars)
+                                if (selectedText.length >= 10) {{
+                                    console.log('✓ Successfully found using window.find');
+                                    return selection;
+                                }} else {{
+                                    console.warn('Match too short, continuing search...');
+                                    window.getSelection().removeAllRanges();
                                 }}
                             }}
                         }}
                     }}
                     
+                    console.warn('window.find() failed for all variants');
+                    return null;
+                }}
+                
+                // Function to find elements containing parts of the search text
+                function findAllElementsWithText(searchText) {{
+                    const normalizedSearch = searchText.replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const searchWords = normalizedSearch.split(' ').filter(w => w.length > 3);
+                    
+                    console.log('Searching for', searchWords.length, 'words across document');
+                    
+                    // Get all text-containing elements
+                    const allElements = document.querySelectorAll('p, li, div, h1, h2, h3, h4, h5, h6, span, blockquote');
+                    const matchingElements = [];
+                    
+                    for (let elem of allElements) {{
+                        const elemText = (elem.innerText || elem.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                        
+                        // Count how many search words this element contains
+                        const matches = searchWords.filter(word => elemText.includes(word)).length;
+                        
+                        if (matches > 0) {{
+                            const rect = elem.getBoundingClientRect();
+                            matchingElements.push({{
+                                element: elem,
+                                matches: matches,
+                                y: rect.top + window.scrollY,
+                                text: elemText.substring(0, 100)
+                            }});
+                        }}
+                    }}
+                    
+                    // Sort by Y position (top to bottom)
+                    matchingElements.sort((a, b) => a.y - b.y);
+                    
+                    console.log('Found', matchingElements.length, 'elements with matching text');
+                    
+                    return matchingElements;
+                }}
+                
+                // Function to expand selection to include more text
+                function expandSelectionToIncludeMore(range, searchText) {{
+                    try {{
+                        const selectedText = range.toString();
+                        console.log('Initial selection length:', selectedText.length);
+                        console.log('Target search text length:', searchText.length);
+                        
+                        // If selection is already substantial (>50% of search text), just return it
+                        if (selectedText.length >= searchText.length * 0.5) {{
+                            console.log('Selection already captures 50%+ of target, keeping as is');
+                            return range;
+                        }}
+                        
+                        // Try to find a parent element that contains more of the text
+                        let container = range.commonAncestorContainer;
+                        if (container.nodeType === 3) {{ // Text node
+                            container = container.parentElement;
+                        }}
+                        
+                        console.log('Starting from container:', container.tagName);
+                        
+                        // Count matching words in search text
+                        const searchWords = searchText.replace(/\\s+/g, ' ').trim().toLowerCase().split(' ').filter(w => w.length > 3);
+                        const searchTextNormalized = searchText.replace(/\\s+/g, ' ').trim().toLowerCase();
+                        console.log('Search has', searchWords.length, 'significant words');
+                        
+                        // Walk up the DOM tree to find best container
+                        let bestContainer = container;
+                        let bestScore = 0;
+                        let bestLength = selectedText.length;
+                        
+                        for (let i = 0; i < 5 && container; i++) {{  // Only check 5 levels max
+                            const containerText = (container.innerText || container.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                            const containerLen = containerText.length;
+                            
+                            // Don't consider containers that are way too large (more than 2x our search text)
+                            if (containerLen > searchText.length * 2) {{
+                                console.log('Level', i, ':', container.tagName, '- too large (', containerLen, 'vs', searchText.length, '), skipping');
+                                container = container.parentElement;
+                                continue;
+                            }}
+                            
+                            // Count how many search words are in this container
+                            const matches = searchWords.filter(w => containerText.includes(w)).length;
+                            const score = matches / searchWords.length;
+                            
+                            console.log('Level', i, ':', container.tagName, 'matches', matches, '/', searchWords.length, '=', (score*100).toFixed(0) + '%', 'length:', containerLen);
+                            
+                            // Only consider containers that:
+                            // 1. Have at least 70% of our words
+                            // 2. Are not too much longer than our search text
+                            // 3. Have a better score than current best
+                            if (score >= 0.7 && score > bestScore && containerLen <= searchText.length * 1.5) {{
+                                bestScore = score;
+                                bestContainer = container;
+                                bestLength = containerLen;
+                                console.log('  → New best container!');
+                            }}
+                            
+                            // If we found 90%+ matches with reasonable length, stop here
+                            if (score >= 0.9 && containerLen <= searchText.length * 1.3) {{
+                                console.log('  → Excellent match with good length, stopping search');
+                                break;
+                            }}
+                            
+                            container = container.parentElement;
+                        }}
+                        
+                        // If we found a better container, use it
+                        if (bestContainer !== range.commonAncestorContainer && bestScore >= 0.7) {{
+                            console.log('Expanding to', bestContainer.tagName, 'with', (bestScore*100).toFixed(0) + '% match, length:', bestLength);
+                            const newRange = document.createRange();
+                            newRange.selectNodeContents(bestContainer);
+                            
+                            const newText = newRange.toString();
+                            console.log('Expanded selection length:', newText.length);
+                            return newRange;
+                        }}
+                        
+                        console.log('No better container found, keeping original range');
+                        return range;
+                        
+                    }} catch (e) {{
+                        console.log('Error expanding selection:', e.message);
+                        return range;
+                    }}
+                }}
+                
+                // Function to wrap selection in a highlight span
+                function wrapSelection(selection, searchText) {{
+                    if (!selection || selection.rangeCount === 0) {{
+                        console.error('No selection to wrap');
+                        return false;
+                    }}
+                    
+                    let range = selection.getRangeAt(0);
+                    
+                    // Check if range is valid
+                    if (!range.startContainer || !range.endContainer) {{
+                        console.error('Invalid range');
+                        return false;
+                    }}
+                    
+                    console.log('Wrapping selection, collapsed:', range.collapsed);
+                    console.log('Start:', range.startContainer.nodeName, 'Offset:', range.startOffset);
+                    console.log('End:', range.endContainer.nodeName, 'Offset:', range.endOffset);
+                    console.log('Selection length:', range.toString().length);
+                    
+                    // Try to expand the selection to include more of the search text
+                    if (searchText) {{
+                        range = expandSelectionToIncludeMore(range, searchText);
+                        console.log('After expansion, selection length:', range.toString().length);
+                    }}
+                    
+                                const span = document.createElement('span');
+                                span.id = 'highlight-target';
+                                span.style.position = 'relative';
+                    span.style.display = 'inline';
+                                
+                                try {{
+                        // Try the simple approach first (works if selection is within a single element)
+                                    range.surroundContents(span);
+                        console.log('✓ Successfully wrapped text (simple method)');
+                        console.log('Span innerHTML length:', span.innerHTML.length);
+                        console.log('Span text content:', span.textContent.substring(0, 100));
+                                    return true;
+                                }} catch (e) {{
+                        console.log('Simple wrap failed:', e.message);
+                        
+                        try {{
+                            // Extract contents and insert in wrapper
+                                    const contents = range.extractContents();
+                                    span.appendChild(contents);
+                                    range.insertNode(span);
+                            console.log('✓ Successfully wrapped text (extract method)');
+                            console.log('Span innerHTML length:', span.innerHTML.length);
+                            console.log('Span text content:', span.textContent.substring(0, 100));
+                            return true;
+                        }} catch (e2) {{
+                            console.log('Extract method failed:', e2.message);
+                            
+                            try {{
+                                // Last resort: Create wrapper at start position
+                                const startNode = range.startContainer;
+                                const startParent = startNode.nodeType === 3 ? startNode.parentNode : startNode;
+                                
+                                // Insert span at the start of selection
+                                range.insertNode(span);
+                                
+                                // Move range contents into span
+                                try {{
+                                    span.appendChild(range.extractContents());
+                                    console.log('✓ Successfully wrapped text (fallback method A)');
+                                }} catch (e3) {{
+                                    // If that fails, just wrap the parent element
+                                    const wrapper = document.createElement('span');
+                                    wrapper.id = 'highlight-target';
+                                    wrapper.style.position = 'relative';
+                                    startParent.parentNode.insertBefore(wrapper, startParent);
+                                    wrapper.appendChild(startParent);
+                                    console.log('✓ Successfully wrapped text (fallback method B - wrapped parent)');
+                                }}
+                                
+                                console.log('Span innerHTML length:', span.innerHTML.length);
+                                console.log('Span text content:', span.textContent ? span.textContent.substring(0, 100) : 'empty');
+                                return true;
+                            }} catch (e3) {{
+                                console.error('All wrapping methods failed:', e3.message);
+                                return false;
+                            }}
+                        }}
+                    }}
+                }}
+                
+                // Fallback: Manual DOM search and wrap
+                function manualTextSearch(searchText) {{
+                    console.log('Trying manual DOM search...');
+                    
+                    const normalized = searchText.replace(/\\s+/g, ' ').trim();
+                    const bodyText = document.body.innerText || document.body.textContent;
+                    const bodyNormalized = bodyText.replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const searchNormalized = normalized.toLowerCase();
+                    
+                    // Find position in normalized text
+                    const pos = bodyNormalized.indexOf(searchNormalized);
+                    if (pos === -1) {{
+                        console.error('Text not found even in normalized body text');
+                        console.log('Searching for:', searchNormalized.substring(0, 100));
+                        console.log('In text:', bodyNormalized.substring(0, 500));
+                        return false;
+                    }}
+                    
+                    console.log('Found text at position', pos, 'in normalized body');
+                    
+                    // Find the FIRST element that contains the START of the text
+                    // Use first 20-30 words to identify the starting element
+                    const searchWords = searchNormalized.split(' ').slice(0, 15).join(' ');
+                    const allElements = document.body.querySelectorAll('p, li, div, h1, h2, h3, h4, h5, h6, blockquote');
+                    
+                    let foundElement = null;
+                    let minPosition = Infinity;
+                    
+                    for (let elem of allElements) {{
+                        const elemText = (elem.innerText || elem.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                        const elemPos = elemText.indexOf(searchWords.split(' ').slice(0, 5).join(' '));
+                        
+                        if (elemPos !== -1) {{
+                            // Check the actual position in the document
+                            const rect = elem.getBoundingClientRect();
+                            const docPosition = rect.top + window.scrollY;
+                            
+                            if (docPosition < minPosition) {{
+                                minPosition = docPosition;
+                                foundElement = elem;
+                                console.log('Found candidate element at position', docPosition, ':', elem.tagName);
+                            }}
+                        }}
+                    }}
+                    
+                    if (foundElement) {{
+                        console.log('Selected first element containing text start:', foundElement.tagName);
+                        
+                        // Wrap this element only (not the whole text if it spans multiple elements)
+                        const wrapper = document.createElement('span');
+                        wrapper.id = 'highlight-target';
+                        wrapper.style.position = 'relative';
+                        wrapper.style.display = 'inline-block';
+                        
+                        // Insert wrapper around element
+                        foundElement.parentNode.insertBefore(wrapper, foundElement);
+                        wrapper.appendChild(foundElement);
+                        
+                        console.log('✓ Wrapped first element with highlight-target');
+                        return true;
+                    }}
+                    
+                    console.error('Could not find containing element');
+                    return false;
+                }}
+                
+                // Main function to find and wrap text across nodes
+                function highlightText(searchText) {{
+                    console.log('=== HIGHLIGHT TEXT START ===');
+                    console.log('Attempting to highlight text (length: ' + searchText.length + ')');
+                    console.log('First 100 chars:', searchText.substring(0, 100));
+                    console.log('Last 100 chars:', searchText.substring(Math.max(0, searchText.length - 100)));
+                    
+                    // Strategy 1: Use window.find()
+                    console.log('Strategy 1: window.find()');
+                    const selection = findTextInDocument(searchText);
+                    
+                    if (selection) {{
+                        const wrapped = wrapSelection(selection, searchText);
+                        if (wrapped) {{
+                            console.log('✓ Successfully highlighted using window.find()');
+                            console.log('=== HIGHLIGHT TEXT END (SUCCESS) ===');
+                            return true;
+                        }}
+                    }}
+                    
+                    // Strategy 2: Manual DOM search
+                    console.log('Strategy 2: Manual DOM search');
+                    if (manualTextSearch(searchText)) {{
+                        console.log('✓ Successfully highlighted using manual search');
+                        console.log('=== HIGHLIGHT TEXT END (SUCCESS) ===');
+                        return true;
+                    }}
+                    
+                    // Strategy 3: Try with a unique portion from the MIDDLE of the text
+                    console.log('Strategy 3: Middle portion search (most unique)');
+                    const normalized = searchText.replace(/\\s+/g, ' ').trim();
+                    const words = normalized.split(' ');
+                    
+                    // Take a chunk from the middle (usually more unique than start/end)
+                    if (words.length > 15) {{
+                        const midStart = Math.floor(words.length / 3);
+                        const midEnd = Math.min(midStart + 15, words.length);
+                        const chunk = words.slice(midStart, midEnd).join(' ');
+                        
+                        console.log('Trying with middle chunk (words', midStart, '-', midEnd, '):', chunk.substring(0, 80));
+                        
+                        if (window.find) {{
+                            window.getSelection().removeAllRanges();
+                            
+                            if (window.find(chunk, false, false, false, false, false, false)) {{
+                                const sel = window.getSelection();
+                                console.log('Found middle chunk! Now expanding to full text...');
+                                
+                                if (wrapSelection(sel, searchText)) {{
+                                    console.log('✓ Successfully highlighted using middle chunk + expansion');
+                                    console.log('=== HIGHLIGHT TEXT END (SUCCESS) ===');
+                                    return true;
+                                }}
+                            }} else {{
+                                console.log('Middle chunk not found, trying with meaningful start...');
+                                
+                                // Fallback: Find first meaningful sequence (skip 1, 6, etc.)
+                                let meaningfulIdx = 0;
+                                for (let i = 0; i < words.length; i++) {{
+                                    if (words[i].length > 4) {{
+                                        meaningfulIdx = i;
+                                        break;
+                                    }}
+                                }}
+                                
+                                if (meaningfulIdx < words.length - 5) {{
+                                    const startChunk = words.slice(meaningfulIdx, Math.min(meaningfulIdx + 15, words.length)).join(' ');
+                                    console.log('Trying meaningful start chunk:', startChunk.substring(0, 80));
+                                    
+                                    window.getSelection().removeAllRanges();
+                                    if (window.find(startChunk, false, false, false, false, false, false)) {{
+                                        const sel = window.getSelection();
+                                        if (wrapSelection(sel, searchText)) {{
+                                            console.log('✓ Successfully highlighted using start chunk');
+                                            console.log('=== HIGHLIGHT TEXT END (SUCCESS) ===');
+                                            return true;
+                                        }}
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                    
+                    console.error('❌ All strategies failed');
+                    console.log('=== HIGHLIGHT TEXT END (FAILURE) ===');
                     return false;
                 }}
                 
@@ -244,27 +1149,39 @@ class MarkitdownImageExtractor:
         <head>
             <meta charset="utf-8">
             <style>
+                @page {{
+                    size: A4;
+                    margin: 0;
+                }}
+                
                 body {{
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                     line-height: 1.6;
-                    max-width: 800px;
-                    margin: 0 auto;
-                    padding: 20px;
+                    width: 794px;
+                    min-height: 1123px;
+                    margin: 0;
+                    padding: 40px;
+                    box-sizing: border-box;
+                    background: white;
                 }}
+                
                 h1, h2, h3, h4, h5, h6 {{
                     color: #333;
                 }}
+                
                 code {{
                     background-color: #f4f4f4;
                     padding: 2px 4px;
                     border-radius: 3px;
                 }}
+                
                 pre {{
                     background-color: #f4f4f4;
                     padding: 10px;
                     border-radius: 5px;
                     overflow-x: auto;
                 }}
+                
                 #highlight-target {{
                     position: relative;
                     display: inline;
@@ -317,7 +1234,8 @@ class MarkitdownImageExtractor:
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1200,800')
+            # A4 size at 96 DPI: 794x1123 pixels
+            chrome_options.add_argument('--window-size=794,1123')
             
             # Setup Chrome driver
             service = Service(ChromeDriverManager().install())
@@ -330,22 +1248,85 @@ class MarkitdownImageExtractor:
             # Wait for JavaScript to execute and mark the text
             # Give more time for the window.find() and DOM manipulation
             import time
-            time.sleep(1)  # Wait for page load and JavaScript execution
+            time.sleep(2)  # Wait for page load and JavaScript execution
             
             # Get bounding box coordinates of the marked element
             bbox_coords = None
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
-                    target_element = driver.find_element(By.ID, "highlight-target")
-                    location = target_element.location
-                    size = target_element.size
+                    # Use JavaScript to find markers, create wrapper, and get bounding rect
+                    bbox_rect = driver.execute_script("""
+                        const startMarker = document.getElementById('chunk-start');
+                        const endMarker = document.getElementById('chunk-end');
+                        
+                        if (!startMarker || !endMarker) {
+                            console.error('❌ Markers not found!', 'start:', !!startMarker, 'end:', !!endMarker);
+                            return null;
+                        }
+                        
+                        console.log('✓ Found both markers');
+                        console.log('  Start marker:', startMarker.outerHTML.substring(0, 100));
+                        console.log('  End marker:', endMarker.outerHTML.substring(0, 100));
+                        
+                        // Create a range from start to end marker
+                        const range = document.createRange();
+                        range.setStartAfter(startMarker);
+                        range.setEndBefore(endMarker);
+                        
+                        const rangeText = range.toString();
+                        console.log('Range text length:', rangeText.length);
+                        console.log('Range text (first 50):', rangeText.substring(0, 50));
+                        console.log('Range text (last 50):', rangeText.substring(rangeText.length - 50));
+                        
+                        const rect = range.getBoundingClientRect();
+                        console.log('Range rect:', JSON.stringify({
+                            x: rect.x, y: rect.y, w: rect.width, h: rect.height
+                        }));
+                        
+                        // Try to create a visual wrapper for the bounding box drawing
+                        // This is just for visualization, the rect is already captured
+                        const wrapper = document.createElement('span');
+                        wrapper.id = 'highlight-target';
+                        wrapper.style.cssText = 'position: relative; display: inline;';
+                        
+                        try {
+                            // Clone the range to avoid modifying the original
+                            const cloneRange = range.cloneRange();
+                            cloneRange.surroundContents(wrapper);
+                            console.log('✓ Created highlight-target wrapper');
+                        } catch (e) {
+                            console.log('⚠ Could not wrap (multi-element span):', e.message);
+                            // Fallback: manually insert wrapper
+                            try {
+                                const fallbackRange = range.cloneRange();
+                                const fragment = fallbackRange.extractContents();
+                                wrapper.appendChild(fragment);
+                                fallbackRange.insertNode(wrapper);
+                                console.log('✓ Created highlight-target using manual insertion');
+                            } catch (e2) {
+                                console.log('⚠ Manual insertion also failed:', e2.message);
+                                // Give up on wrapper, just ensure the element exists for the draw_box code
+                                document.body.appendChild(wrapper);
+                                console.log('✓ Added dummy highlight-target to body');
+                            }
+                        }
+                        
+                        return {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                            top: rect.top,
+                            left: rect.left
+                        };
+                    """)
                     
-                    # Calculate bounding box
-                    left = int(location['x'])
-                    top = int(location['y'])
-                    right = int(location['x'] + size['width'])
-                    bottom = int(location['y'] + size['height'])
+                    if bbox_rect and bbox_rect['width'] > 0 and bbox_rect['height'] > 0:
+                        left = int(bbox_rect['left'])
+                        top = int(bbox_rect['top'])
+                        right = int(bbox_rect['left'] + bbox_rect['width'])
+                        bottom = int(bbox_rect['top'] + bbox_rect['height'])
                     
                     bbox_coords = (left, top, right, bottom)
                     break
@@ -353,9 +1334,7 @@ class MarkitdownImageExtractor:
                     if attempt < max_attempts - 1:
                         time.sleep(0.5)  # Wait a bit more
                     else:
-                        # If we can't find the element after all attempts, return default coords
-                        print(f"Warning: Could not find highlight-target element: {e}")
-                        bbox_coords = (50, 50, 350, 100)
+                        raise RuntimeError(f"Failed to get bounding box after {max_attempts} attempts")
             
             # Take screenshot
             screenshot = driver.get_screenshot_as_png()
