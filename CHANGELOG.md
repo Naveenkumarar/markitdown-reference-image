@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2024-11-24
+
 ### Added
 - **DOM-based positioning**: Bounding boxes now use actual pixel coordinates from browser rendering
 - **JavaScript-based text finding**: Uses `window.find()` API for multi-line text support
@@ -24,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_html_to_image()` replaced with `_html_to_image_with_bbox()` that returns coordinates
 - Increased wait time for JavaScript execution to ensure element marking completes
 - Improved text normalization for better matching across HTML elements
+- **Refactored JavaScript code** to external file (`utils/script.js`) for better maintainability
+- **Removed all debug print statements** from production code for cleaner output
+- Updated packaging configuration to include JavaScript assets
 
 ### Fixed
 - ✅ Inaccurate bounding box positioning with variable-width fonts
