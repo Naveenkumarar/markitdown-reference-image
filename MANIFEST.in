@@ -3,7 +3,7 @@ include LICENSE
 include CHANGELOG.md
 include requirements.txt
 include requirements-dev.txt
-recursive-include markitdown_reference_image *.py
+recursive-include markitdown_reference_image *.py *.js
 recursive-include docs *.md *.rst *.txt
 global-exclude *.pyc
 global-exclude __pycache__

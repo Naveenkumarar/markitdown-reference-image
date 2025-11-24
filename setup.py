@@ -4,6 +4,10 @@ setup(
     name="markitdown-reference-image",
     version="0.1.0",
     packages=find_packages(),
+    package_data={
+        "markitdown_reference_image": ["utils/*.js"],
+    },
+    include_package_data=True,
     python_requires=">=3.7",
     install_requires=[
         "Pillow>=8.0.0",
